@@ -1,0 +1,104 @@
+digraph G {
+    compound = true;
+
+    start -> RSRPCServices_append    -> HRegion_append    -> doDelta_Start;
+    start -> RSRPCServices_increment -> HRegion_increment -> doDelta_Start;
+    start -> RSRPCServices_put       -> PUT_Start;
+    start -> RSRPCServices_delete    -> del_start;
+    
+    subgraph cluster_doDelta {
+        label = "HRegion_doDelta"
+        doDelta_Start [shape=polygon, style=filled];
+        doDelta_Start -> HRegion_getRowLockInternal;
+        memStore[label="construct Map<HStore, List<Cell>> forMemStore"];
+        HRegion_getRowLockInternal->memStore;
+        reckOnDeltas[label="HRegion_reckonDeltas"]
+        memStore -> reckOnDeltas;
+        memStoreEnabled[shape=diamond, label="Mem store enabled?"]
+        memStoreEnabled->HRegion_doWALAppend [label="true"];
+        memStoreEnabled->HRegion_recordMutationWithoutWal[label="false"];
+        reckOnDeltas -> memStoreEnabled;
+        applyToMemStores[label="For each column family (doing it a column family at a time): write to MemStore", 
+                         style=filled, fillcolor=lightyellow]
+        HRegion_doWALAppend [style=filled, fillcolor=lawngreen];
+        HRegion_recordMutationWithoutWal -> applyToMemStores;
+        HRegion_doWALAppend -> applyToMemStores;
+        applyToMemStores -> MultiVersionConcurrencyControl_completeAndWait;
+        doDelta_End [shape=polygon, style=filled];
+        MultiVersionConcurrencyControl_completeAndWait -> doDelta_End;
+    }
+    
+    
+    subgraph cluster_put {
+        label = "PUT"
+        PUT_Start [shape=polygon, style=filled];
+        PUT_Start -> condRequest;
+        condRequest[label="Request has condition?", shape=diamond];
+        extractProtoBuf[label="Extract from Proto Buf."];
+        extractData[label="Extract data like row, family, ect."];
+        condRequest -> extractProtoBuf [label="true"];
+        extractProtoBuf -> extractData;
+        extractData -> HRegion_checkAndMutate;
+        HRegion_checkAndMutate -> HRegion_doCheckAndRowMutate;
+        HRegion_doCheckAndRowMutate -> Get_addColumn -> HRegion_checkRow -> nullMutation;
+        nullMutation [label="Is mutation null?", shape=daimond];
+        nullMutation -> HRegion_doBatchMutate [label = "false"];
+        nullMutation -> HRegion_mutateRow [label="true"];
+        HRegion_mutateRow -> HRegion_batchMutate;
+        
+        condRequest -> HRegion_put [label="false"];
+        HRegion_put -> HRegion_doBatchMutate;
+        HRegion_doBatchMutate -> HRegion_batchMutate;
+        HRegion_batchMutate -> initialized;
+        initialized [label="Operation intialized?", shape=diamond];
+        initialized -> increment_write_request_count [label="false"];
+        increment_write_request_count -> checkAndPrepare;
+
+        checkAndPrepare -> doMiniBatchMutate_Start; // lockRowsAndBuildMiniBatch[lhead = "cluster_doMiniBatchMutate"];
+        initialized -> doMiniBatchMutate_Start[label="true"]; //lockRowsAndBuildMiniBatch [label="true", lhead = "cluster_doMiniBatchMutate"];
+        subgraph cluster_doMiniBatchMutate {
+            label = HRegion_doMiniBatchMutate;
+            doMiniBatchMutate_Start [shape=polygon, style=filled];
+            doMiniBatchMutate_Start -> lockRowsAndBuildMiniBatch;
+            lockRowsAndBuildMiniBatch [label="BatchOperation::lockRowsAndBuildMiniBatch"];
+            prepareMiniBatchOperations [label="BatchOperation::prepareMiniBatchOperations"];
+            buildWALEdits [label="BatchOperation::buildWALEdits -- constructs List<Pair<NonceKey, WALEdit>>"];
+            doWALAppend [label="For each WAL Edit call HRegion::doWALAppend"
+                        ,style=filled, fillcolor=lawngreen ]
+            writeMiniBatchOperationsToMemStore[label="abstract BatchOperation::writeMiniBatchOperationsToMemStore"
+                                              ,style=filled, fillcolor=lightyellow];
+            completeMiniBatchOperations [label="BatchOperation::completeMiniBatchOperations"];
+            lockRowsAndBuildMiniBatch -> prepareMiniBatchOperations -> buildWALEdits -> doWALAppend;
+            doWALAppend -> writeMiniBatchOperationsToMemStore -> completeMiniBatchOperations;
+            completeMiniBatchOperations -> doMiniBatchMutate_End;
+            doMiniBatchMutate_End [shape=polygon, style=filled];
+        }
+        doMiniBatchMutate_End -> HRegion_requestFlushIfNeeded;// [ltail = "cluster_doMiniBatchMutate"];
+        
+        HRegion_requestFlushIfNeeded -> PUT_End;
+        PUT_End [shape=polygon, style=filled];
+    }
+    
+    subgraph cluster_del {
+        label = "Delete"
+        del_start [shape=polygon, style = filled];
+        del_start -> del_cond;
+        del_cond [shape=diamond]
+        del_cond ->extract_values [label="true"];
+            extract_values [label = "Extract values like row, column etc."]
+            extract_values -> preCheckAndDelete;
+            preCheckAndDelete -> HRegion_checkAndMutate;
+        del_cond -> HRegion_delete [label="false"];
+            HRegion_delete -> HRegion_doBatchMutate;
+        
+        HRegion_delete -> del_end [style=dashed];
+        preCheckAndDelete -> del_end [style=dashed];
+        del_end [shape=polygon, style = filled, label="This is just a place holder, actual end is PUT_End."];
+        // PUT_End -> del_end;
+    }
+
+    doDelta_End -> end;
+    PUT_End -> end;
+  start [shape=Mdiamond, style=filled];
+  end [shape=Msquare, style=filled];
+}

@@ -1,0 +1,242 @@
+digraph G {
+    compound = true;
+    // concentrate=true;
+    defaultdist = epsilon;
+    sep = 0.2;
+    len = 0.02;
+    // nodesep = 0.02;
+    
+
+    region [shape=oval, label=<Region Scanner <BR /> An object represents scan of a region>]
+    
+    subgraph cluster_storeScanner {
+        label = <A collection of two heaps of scanners called Store Scanner (SS). <BR /> Each Store Scanner represents a <b>column family</b>.>;
+        style = rounded;
+
+        subgraph cluster_storeHeap {
+            label = <storeHeap: <i>A heap of Store Scanners which are required for sure <BR /> e.g. projection or condition evaluation.</i>>;
+            SSi [label = <SS_i<SUB>uncond_req</SUB>>]
+            SSj [label = <SS_j<SUB>uncond_req</SUB>>]
+            SSk [label = <SS_k<SUB>uncond_req</SUB>>]
+            SSl [label = <SS_l<SUB>uncond_req</SUB>>]
+            
+            SSi -> SSj;
+            SSi -> SSk;
+            SSi -> SSl;
+            {rank = same; SSk; SSl}
+        }
+        subgraph rel3 {
+            edge [dir=none, style=dashed]
+            SSk -> SSl
+        }
+        
+        subgraph cluster_joinedHeap {
+            label = <joinedHeap: <i>A heap of Store Scanners which are required <BR /> based on condition evaluation in storeHeap.</i>>;
+            SSp [label = <SS_p<SUB>cond_req</SUB>>]
+            SSq [label = <SS_q<SUB>cond_req</SUB>>]
+            SSr [label = <SS_r<SUB>cond_req</SUB>>]
+            SSs [label = <SS_s<SUB>cond_req</SUB>>]
+            
+            SSp -> SSq;
+            SSp -> SSr;
+            SSp -> SSs;
+            {rank = same; SSr; SSs}
+        }
+        subgraph rel4 {
+            edge [dir=none, style=dashed]
+            SSr -> SSs;
+        }
+        
+    }
+
+
+    subgraph cluster_storeFile {
+        label = <A heap of <b>Store File Scanners (SFS)</b>    , <b>Active MemStore Scanner (AMS)</b>, and <b> Segment MemStore Scanner (SMS)</b>.<BR/>
+                <i>A Store File Scanner represents an HFile. <BR/>
+                Active MemStore Scanner (AMS) represents the active Mem Store. Snapshot Mem Store Scanner (SMS) represents the Snapshot Mem Store Scanner.<BR/>
+                Note: The Mem Store scanner need not be on top of the heap always.
+                </i>>;
+        AMS -> SFS1;
+        AMS -> SMS;
+        AMS -> SFS2;
+        AMS -> SFS3;
+        {rank = same; SFS2; SFS3}
+    }
+    subgraph rel4 {
+        edge [dir=none, style=dashed]
+        SFS2 -> SFS3;
+    }
+
+
+    // subgraph cluster_memStore  {
+    //     label = <A heap of <b>Mem Store Scanners (MS).</b><BR/>
+    //             <i>It consists of a scanner (AMS) representing the Active Mem Store (because there is exactly one active Mem Store for each column family at a time)<BR/>
+    //             and one or more Snapshot Mem Stores (SMS) scanners, one represeting each snapshot Mem Store.<BR/>
+    //             </i>>;
+    //     AMS -> SMS1;
+    //     AMS -> SMS2;
+    //     AMS -> SMS3;
+    //     {rank = same; SMS2; SMS3}
+    // }
+    // subgraph rel4 {
+    //     edge [dir=none, style=dashed]
+    //     SMS2 -> SMS3;
+    // }
+
+    subgraph cluster_individualMSScanner {
+        label = <<i>Every Mem Store Scanner is a Java iterator. <BR/>
+                 It is obtained from the property that the <b>Cell set</b> stored in the Mem Stores implements the NavigableSet of Java.
+                 </i>>;
+        iterateableCellSet;
+    }
+    
+    subgraph cluster_storeFileScannerConstituents {
+        
+        
+        Loop [label = "For each HStoreFile for this Store ordered by the Sequence ID of the file"];
+        
+        subgraph cluster_openHFile {
+            label = "Activities related to opening of an HFile"
+            node [shape = rect]
+            FSDataInputStreamWrapper [label = "Construct an object of FSDataInputStreamWrapper."]
+            checkAccessPermissions [label = "Get Access premissions and check status of the file."]
+            computeHDFSBlocksDistribution [label = <Compute the HDFS Block Distribution. <BR/>
+                                                    For each block location, <BR/>
+                                                    store the host name and length of the file.>]
+            SFR [label = <Create an object of StoreFileReader or <BR/>
+                          HalfStoreFileReader or coprocessorHost.preStoreFileReaderOpen <BR/>
+                          based on the input.>]
+            
+            FSDataInputStreamWrapper -> checkAccessPermissions;
+            checkAccessPermissions -> computeHDFSBlocksDistribution;
+            computeHDFSBlocksDistribution -> SFR;
+            
+            subgraph cluster_storeFileReaderConstruction {
+                label = "Creation of the Store File Reader's object."
+                // node [shape = rect]
+                HFileSystem [label = "Create an object of HFileSystem"]
+                HFROpenReader [label = "call to a static method HFile.Reader::openReader"]
+                FileTrailer [label = <Create a file trailer object and read the trailer <BR/>
+                                      from the input stream -- new FixedFileTrailer()>]
+                
+                HFileSystem -> HFROpenReader -> FileTrailer;
+                subgraph cluster_HFileReaderImpl {
+                    label = "Construction of the HFileReaderImpl object"
+                    // node [shape = rect]
+                    hFileContext [label = "this.hfileContext = createHFileContext"]
+                    fsBlockReader [label = "this.fsBlockReader = new HFileBlock.FSReaderImpl"]
+                    dataBlockIndexReader [label = <dataBlockIndexReader = new <BR/>
+                                                   HFileBlockIndex.CellBasedKeyBlockIndexReader>]
+                    metaBlockIndexReader [label = <metaBlockIndexReader = new <BR/>
+                                                   HFileBlockIndex.ByteArrayKeyBlockIndexReader>]
+                    blockIter [label = "HFileBlock.BlockIterator blockIter = fsBlockReader.blockRange"]
+                    multiLevelRootIndex [label = "dataBlockIndexReader.readMultiLevelIndexRoot"]
+                    rootIndex [label = "metaBlockIndexReader.readRootIndex"]
+                    fileInfo [label = "fileInfo = new FileInfo()"]
+                    byteStream [label = <fileInfo.read(blockIter.nextBlockWithBlockType <BR/>
+                                        (BlockType.FILE_INFO).getByteStream())>]
+                    loadOnOpen [label = "Store all other load-on-open blocks for further consumption."]
+                    prefetchBlocks [label = "Prefetch file blocks upon open if requested"]
+                    
+                    hFileContext -> fsBlockReader -> dataBlockIndexReader -> metaBlockIndexReader -> blockIter;
+                    blockIter -> multiLevelRootIndex -> rootIndex -> fileInfo -> byteStream -> loadOnOpen -> prefetchBlocks;
+                }
+                FileTrailer -> hFileContext [lhead = "cluster_HFileReaderImpl", ltail = "cluster_storeFileReaderConstruction"]
+            }
+            SFR -> HFileSystem [lhead = "cluster_storeFileReaderConstruction"] 
+        }
+        Loop -> FSDataInputStreamWrapper [lhead = "cluster_openHFile"];
+        // OpenHFile [label = "Open the HFile"]
+        // SFR [label = "Create an obect of StoreFileReader"]
+        // LoadFileInfo [label = "Load indices, FileInfo, Bloom Filter. Store the meta data in a Meta Data Map"]
+        
+        subgraph cluster_loadFileInfo {
+            label = "Activities related to loading of the file info.";
+            node [shape = rect]
+            lFI_a [label = "This method returns a Map<byte[], byte[]>. This method contains all the file info."]
+            lFI_b [label = <This done by calling: FileInfo HFileReaderImpl::loadFileInfo().<BR/>
+                            FileInfo class implements the interface SortedMap>]
+            lFI_c [label = <It ultimately comes to the HFile.FileInfo object called fileInfo stored in HFileReaderImpl <BR/>
+                            which is initialized as part of creation of the StoreFileReader object.
+                            >;]
+            lFI_a -> lFI_b;
+            lFI_b -> lFI_c;
+        }
+        
+        prefetchBlocks -> lFI_a [ltail = "cluster_openHFile", lhead = "cluster_loadFileInfo"];
+        subgraph cluster_loadBloomFilter {
+            label = "The bloom filter related activities.";
+            node [shape = rect]
+            getGenMeta [label = "Use HFileReaderImpl::getGeneralBloomFilterMetadata() to get the meta data"]
+            CompBF [label = "Use the static method BloomFilterFactory::createFromMeta() to get an object of CompoundBloomFilter."]
+            CBF [label = <The constructor of CompoundBloomFilter creates index <BR/>
+                          which is either of type index = new <BR/>
+                          HFileBlockIndex.ByteArrayKeyBlockIndexReader or index = <BR/>
+                          new HFileBlockIndex.CellBasedKeyBlockIndexReader <BR/>
+                          based on the comparator.>;]
+            CBFR [label = "The constructor of CompoundBloomFilter also reads the root level index."]
+            getGenMeta -> CompBF -> CBF -> CBFR;
+        }
+        
+        
+        lFI_c -> getGenMeta [ltail = "cluster_loadFileInfo", lhead = "cluster_loadBloomFilter"];
+        // getGenMeta -> Loop [ltail = "cluster_loadBloomFilter"];
+        
+        // label = <<i>Every Store File Scanner has a <b>StoreFileReader</b>  and an HFileScanner.<BR/>
+        //          While creating a Store File Scanner, the Store File Reader and the HFile Scanner are constructed. <BR/>
+        //          </i>>;
+        // SFR [label = <Store File Reader<BR/>
+        //               While constructing the Store File Reader, the desired file is opened and the meta data is read.<BR/>
+        //               It can also be of type HalfStoreFileReader.
+        //               >];
+        // HFS [label = <HFile Scanner<BR/>
+        //               It contains a ference to the HFile Reader object constructed while constructing the Store File Reader.>];
+        // HFR [label = <HFile Reader. <BR/>
+        //               Object representing the HFile to be read. <BR/>
+        //               This is stored as StoreFileReader.reader and is of concerete type HFileReaderImpl.
+        //               >]
+        
+        // SFR -> HFR;
+        // edge [style=dashed, label="HFile Scanner also stores a refernece to the Store File Reader."]
+        // HFS -> HFR;
+        // // {rank = same; SFR; HFS;}
+        // subgraph cluster_HFileReaderImpl {
+        //     label = <<i>It does the actual reads. <BR/>
+        //             Among many, it has the below objects.
+        //             </i>>;
+        //     CellBasedKeyBlockIndexReader [label = "HFileBlockIndex.CellBasedKeyBlockIndexReader "];
+        //     ByteArrayKeyBlockIndexReader [label = "HFileBlockIndex.ByteArrayKeyBlockIndexReader "];
+        //     ComppressionAlgorithm;
+        //     Compartor;
+        //     FilePath;
+        //     FileName;
+        //     FileInfo;
+        //     FSReader [label = "FSReader: Filesystem-level block reader."];
+        //     FileContext [label = "HFileContext: File Context"]
+        // }
+        // HFR -> FilePath [lhead = "cluster_HFileReaderImpl"
+        //                  label = "Contituents of HFile Reader."]
+    }
+
+
+    
+
+  start -> region;
+  region -> SSp [lhead="cluster_storeScanner"];
+  SSj -> MS [lhead = "cluster_storeFile", label=<<i>The arrow originating from SS_j is only representative here.<BR/>
+            In reality one such arrow alongside the leading structure is to originate <BR/>
+            from each node in the above (Store Scanner) cluster.</i>>];
+  MS -> AMS [lhead = "cluster_memStore"]
+  AMS -> iterateableCellSet [lhead="cluster_individualMSScanner",  label=<<i>The arrows originating from AMS and SMS2 are only representative here.<BR/>
+            In reality one such arrow alongside the leading structure is to originate <BR/>
+            from each node in the above (Mem Store Scanners) cluster.</i>>];
+  SMS -> iterateableCellSet [lhead="cluster_individualMSScanner", style=dashed]
+  SFS1 -> Loop [lhead = "cluster_storeFileScannerConstituents", 
+                label = <<i>Constituents of a Store File Scanner. 
+                        </i>>]
+    CBFR -> end [ltail = "cluster_storeFileScannerConstituents"]
+
+  start [shape=Mdiamond];
+  end [shape=Msquare];
+}
+
